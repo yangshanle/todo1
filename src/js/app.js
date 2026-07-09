@@ -170,6 +170,7 @@ const App = {
     // Keyboard "thanks" → 🎉
     let seq = '';
     document.addEventListener('keydown', (e) => {
+      if (!e.key) return;
       seq += e.key.toLowerCase();
       seq = seq.slice(-6);
       if (seq === 'thanks') {
