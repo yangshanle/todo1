@@ -3139,11 +3139,11 @@ const App = {
     this._ghLoad();
   },
 
-  // 从公共 raw 地址拉取（访客模式）
+  // 从公共 Pages 地址拉取（访客模式）
   async _ghLoadPublic() {
     if (!navigator.onLine) return;
     try {
-      const data = await GitHubSync.pull();
+      var data = await GitHubSync.pullPublic('yangshanle', 'todo1');
       if (data && data.profile) {
         this.store.d = data;
         try { localStorage.setItem(this.store.key, JSON.stringify(data)); } catch(e) {}
@@ -3151,7 +3151,6 @@ const App = {
         console.log('[gh] loaded public data');
       }
     } catch(e) {
-      if (e.message.includes('404')) return; // 还没有 data.json
       console.log('[gh] public load skipped:', e.message);
     }
   },
