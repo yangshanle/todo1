@@ -19,6 +19,7 @@ const App = {
   _gvList: [],
   _gvIdx: 0,
   _ghBusy: false,
+  _ghPending: false,
   _animating: false,
   _poetryIdx: 0,
   _poetryList: [],
@@ -3171,14 +3172,24 @@ const App = {
     }
   },
 
-  // 保存到 GitHub
+  // 保存到 GitHub（带队列，避免并发冲突）
   async _ghSave() {
-    if (this._ghBusy) return;
+    if (this._ghBusy) {
+      // 有保存进行中，排队等待
+      this._ghPending = true;
+      return;
+    }
     this._ghBusy = true;
+    this._ghPending = false;
     try {
       await GitHubSync.push(this.store.data);
       this._showSyncIndicator(true);
       console.log('[gh] save OK');
+      // 如果排队中有新的保存请求，继续处理
+      if (this._ghPending) {
+        this._ghBusy = false;
+        this._ghSave();
+      }
     } catch(e) {
       console.warn('[gh] save failed:', e.message);
       this._showSyncIndicator(false);
