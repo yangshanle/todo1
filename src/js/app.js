@@ -3140,10 +3140,14 @@ const App = {
     this._ghLoad();
   },
 
-  // 从公共 Pages 地址拉取（访客模式）
+  // 从公共 Pages 地址拉取（访客模式，仅首次访问时覆盖）
   async _ghLoadPublic() {
     if (!navigator.onLine) return;
     try {
+      // 如果本地已有真实数据（姓名不是默认值），不覆盖
+      var localName = this.store.data.profile?.name || '';
+      if (localName && localName !== 'Your Name') return;
+
       var data = await GitHubSync.pullPublic('yangshanle', 'todo1');
       if (data && data.profile) {
         this.store.d = data;
