@@ -18,14 +18,8 @@ const App = {
   searchArticles: '',
   _gvList: [],
   _gvIdx: 0,
-  _ossConnected: false,
-  _ossBucket: '',
-  _ossRegion: '',
-  _ossAk: '',
-  _ossSk: '',
-  _ossBusy: false,
+  _ghBusy: false,
   _animating: false,
-  _ossLastSync: '',
   _poetryIdx: 0,
   _poetryList: [],
   // 2048 game state
@@ -84,7 +78,7 @@ const App = {
   init() {
     try {
       this.store = new Store('portfolio_data', this.defaults, () => {
-        if (this._ossConnected) this._ossSave();
+        if (GitHubSync.isReady()) this._ghSave();
       });
       this._g2048reached = {};
       // Migrate skills from profile to global
@@ -119,7 +113,7 @@ const App = {
       requestAnimationFrame(() => this.updateTabIndicator());
       this.initScrollEffects();
       this.generatePageDecorations();
-      this._ossInit();
+      this._ghInit();
       this.initReadCounter();
       this.initQuotes();
       this.initKaomoji();
@@ -3134,142 +3128,80 @@ const App = {
 
   closeModal() { $('modal').style.display='none'; $('modal').querySelector('.modal-box').classList.remove('modal-wide'); },
 
-  // ===== ALIBABA OSS SYNC =====
-  // Public OSS config (bucket & region are public, AK/SK stay private in localStorage)
-  _ossPubBucket: 'todoyangshanle',
-  _ossPubRegion: 'oss-cn-beijing',
-
-  _ossInit() {
-    this._ossBucket = localStorage.getItem('portfolio_oss_bucket') || this._ossPubBucket;
-    this._ossRegion = localStorage.getItem('portfolio_oss_region') || this._ossPubRegion;
-    this._ossAk = localStorage.getItem('portfolio_oss_ak') || '';
-    const sk = localStorage.getItem('portfolio_oss_sk');
-    this._ossSk = sk ? atob(sk) : '';
-    this._ossConnected = !!(this._ossBucket && this._ossRegion && this._ossAk && this._ossSk);
-    this._ossLastSync = localStorage.getItem('portfolio_oss_stamp') || '';
-    // Load from OSS silently (for visitors) - with timeout for offline
-    this._ossLoad();
+  // ===== GITHUB SYNC =====
+  _ghInit() {
+    // 如果是访客（没有配置 GitHub），尝试从 raw 拉取
+    if (!GitHubSync.isReady()) {
+      this._ghLoadPublic();
+      return;
+    }
+    this._ghLoad();
   },
 
-  // OSS Signature V1: HMAC-SHA1 with x-oss-date (fetch blocks Date header)
-  async _ossSign(str) {
-    const enc = new TextEncoder();
-    const key = await crypto.subtle.importKey('raw', enc.encode(this._ossSk),
-      {name:'HMAC',hash:'SHA-1'}, false, ['sign']);
-    const sig = await crypto.subtle.sign('HMAC', key, enc.encode(str));
-    return btoa(String.fromCharCode(...new Uint8Array(sig)));
-  },
-
-  // Save to OSS
-  async _ossSave() {
-    if (!this._ossConnected) return;
-    if (this._ossBusy) return;
-    this._ossBusy = true;
+  // 从公共 raw 地址拉取（访客模式）
+  async _ghLoadPublic() {
+    if (!navigator.onLine) return;
     try {
-      const json = JSON.stringify(this.store.data, null, 2);
-      const date = new Date().toUTCString();
-      // Use x-oss-date because fetch() silently drops the Date header
-      const resource = '/' + this._ossBucket + '/data.json';
-      const signStr = 'PUT\n\napplication/json\n' + date + '\n' + 'x-oss-date:' + date + '\n' + resource;
-      const sign = await this._ossSign(signStr);
-      const url = 'https://' + this._ossBucket + '.' + this._ossRegion + '.aliyuncs.com/data.json';
-      const res = await fetch(url, {
-        method:'PUT',
-        headers:{
-          'Authorization':'OSS ' + this._ossAk + ':' + sign,
-          'Content-Type':'application/json',
-          'x-oss-date': date,
-        },
-        body: json,
-      });
-      if (res.ok) {
-        const now = new Date().toLocaleString();
-        this._ossLastSync = now;
-        localStorage.setItem('portfolio_oss_stamp', now);
-        this._showSyncIndicator(true);
-        console.log('[oss] save OK', now);
-      } else {
-        const text = await res.text();
-        console.warn('[oss] save failed:', res.status, text);
-        this._showSyncIndicator(false);
-        this.toast('❌ 同步失败 ('+res.status+') ' + text.slice(0,120));
+      const data = await GitHubSync.pull();
+      if (data && data.profile) {
+        this.store.d = data;
+        try { localStorage.setItem(this.store.key, JSON.stringify(data)); } catch(e) {}
+        this.render();
+        console.log('[gh] loaded public data');
       }
     } catch(e) {
-      console.warn('[oss] error:', e);
+      if (e.message.includes('404')) return; // 还没有 data.json
+      console.log('[gh] public load skipped:', e.message);
+    }
+  },
+
+  // 从 GitHub 拉取数据（已配置 token）
+  async _ghLoad() {
+    if (!navigator.onLine) return;
+    try {
+      const data = await GitHubSync.pull();
+      if (data && data.profile) {
+        this.store.d = data;
+        try { localStorage.setItem(this.store.key, JSON.stringify(data)); } catch(e) {}
+        this.render();
+        console.log('[gh] loaded data');
+      }
+    } catch(e) {
+      console.warn('[gh] load error:', e.message);
+    }
+  },
+
+  // 保存到 GitHub
+  async _ghSave() {
+    if (this._ghBusy) return;
+    this._ghBusy = true;
+    try {
+      await GitHubSync.push(this.store.data);
+      this._showSyncIndicator(true);
+      console.log('[gh] save OK');
+    } catch(e) {
+      console.warn('[gh] save failed:', e.message);
       this._showSyncIndicator(false);
       this.toast('❌ 同步失败: '+e.message);
     }
-    this._ossBusy = false;
+    this._ghBusy = false;
   },
 
-  // Load from OSS (anonymous GET) - with offline support
-  async _ossLoad() {
-    // Check network status first
-    if (!navigator.onLine) {
-      console.log('[oss] offline, skipping cloud load');
-      return;
-    }
-    
-    try {
-      const url = 'https://' + this._ossBucket + '.' + this._ossRegion + '.aliyuncs.com/data.json?_cb='+Date.now();
-      
-      // Add timeout to prevent hanging
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
-      
-      const r = await fetch(url, {cache:'no-store', signal: controller.signal});
-      clearTimeout(timeoutId);
-      
-      if (!r.ok) { console.log('[oss] no data.json yet'); return; }
-      const data = await r.json();
-      if (!data||!data.profile) return;
-      console.log('[oss] loaded data from cloud');
-      this.store.d = data;
-      try { localStorage.setItem(this.store.key, JSON.stringify(data)); } catch(e) { console.warn(e); }
-      this.render();
-    } catch(e) { 
-      if (e.name === 'AbortError') {
-        console.log('[oss] load timeout, skipping');
-      } else {
-        console.warn('[oss] load error:', e.message); 
-      }
-    }
-  },
-
-  _connectOSS() {
-    const bucket = $('oss_bucket')?.value?.trim();
-    const region = $('oss_region')?.value?.trim();
-    const ak = $('oss_ak')?.value?.trim();
-    const sk = $('oss_sk')?.value?.trim();
-    if (!bucket||!region||!ak||!sk) { this.toast('请填写所有字段'); return; }
-    this._ossBucket = bucket;
-    this._ossRegion = region;
-    this._ossAk = ak;
-    this._ossSk = sk;
-    this._ossConnected = true;
-    localStorage.setItem('portfolio_oss_bucket', bucket);
-    localStorage.setItem('portfolio_oss_region', region);
-    localStorage.setItem('portfolio_oss_ak', ak);
-    localStorage.setItem('portfolio_oss_sk', btoa(sk));
+  _connectGH() {
+    const owner = $('gh_owner')?.value?.trim();
+    const repo = $('gh_repo')?.value?.trim();
+    const token = $('gh_token')?.value?.trim();
+    if (!owner||!repo||!token) { this.toast('请填写所有字段'); return; }
+    GitHubSync.init(owner, repo, token);
     this.toast('✅ 已连接');
     this.closeModal();
-    this._ossSave();
+    this._ghSave();
     setTimeout(() => this.showBackupModal(), 800);
   },
 
-  _disconnectOSS() {
-    if (!confirm('断开同步连接？数据不会丢失。')) return;
-    this._ossConnected = false;
-    this._ossBucket = '';
-    this._ossRegion = '';
-    this._ossAk = '';
-    this._ossSk = '';
-    this._ossLastSync = '';
-    localStorage.removeItem('portfolio_oss_bucket');
-    localStorage.removeItem('portfolio_oss_region');
-    localStorage.removeItem('portfolio_oss_ak');
-    localStorage.removeItem('portfolio_oss_sk');
-    localStorage.removeItem('portfolio_oss_stamp');
+  _disconnectGH() {
+    if (!confirm('断开同步连接？本地数据不会丢失。')) return;
+    GitHubSync.disconnect();
     this.closeModal();
     this.toast('已断开同步');
     setTimeout(() => this.showBackupModal(), 500);
@@ -3288,19 +3220,34 @@ const App = {
     el._t = setTimeout(() => { el.className = ''; }, 2000);
   },
 
+  _showSyncIndicator(ok) {
+    let el = $('syncInd');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'syncInd';
+      document.body.appendChild(el);
+    }
+    el.textContent = ok ? '☁️ 已同步' : '☁️ 失败';
+    el.className = 'show';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.className = ''; }, 2000);
+  },
+
   // ===== BACKUP & RESTORE =====
   showBackupModal() {
-    const connected = this._ossConnected;
+    const connected = GitHubSync.isReady();
+    const syncCfg = GitHubSync.config();
+    const lastSync = GitHubSync.lastSync();
     let syncHtml;
     if (connected) {
       syncHtml = `
         <div style="margin:14px 0;padding:12px;border-radius:8px;background:var(--alt);border:1px solid var(--b2)">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
             <span style="color:#4CAF50">✅</span>
-            <span style="font-size:0.85rem;font-weight:600">☁️ 阿里云 OSS 同步已连接</span>
+            <span style="font-size:0.85rem;font-weight:600">🐙 GitHub 同步已连接</span>
           </div>
-          <div style="font-size:0.72rem;color:var(--t3);margin-bottom:4px">Bucket: ${esc(this._ossBucket)} / Region: ${esc(this._ossRegion)}</div>
-          ${this._ossLastSync?'<div style="font-size:0.72rem;color:var(--t3);margin-bottom:10px">上次同步: '+esc(this._ossLastSync)+'</div>':''}
+          <div style="font-size:0.72rem;color:var(--t3);margin-bottom:4px">${esc(syncCfg.owner)}/${esc(syncCfg.repo)}</div>
+          ${lastSync?'<div style="font-size:0.72rem;color:var(--t3);margin-bottom:10px">上次同步: '+esc(lastSync)+'</div>':''}
           <button class="btn btn-sm btn-p" id="syncNowBtn" style="width:100%;margin-bottom:4px">🔄 立即同步</button>
           <button class="btn btn-sm" id="syncDisBtn" style="width:100%;background:var(--tag-bg);color:var(--red)">🔌 断开连接</button>
         </div>
@@ -3308,12 +3255,11 @@ const App = {
     } else {
       syncHtml = `
         <div style="margin:14px 0;padding:12px;border-radius:8px;background:var(--alt);border:1px solid var(--b2)">
-          <div style="font-size:0.82rem;font-weight:600;margin-bottom:8px">☁️ 阿里云 OSS 自动同步</div>
-          <p style="font-size:0.75rem;color:var(--t3);margin-bottom:8px;line-height:1.5">开启后每次修改自动同步 data.json 到阿里云 OSS。<br>需要先创建 <b>公开</b> 存储空间，填写以下信息：</p>
-          <div class="fg" style="margin-bottom:6px"><label>Bucket 名称</label><input id="oss_bucket" value="${esc(this._ossBucket)}" placeholder="my-bucket"></div>
-          <div class="fg" style="margin-bottom:6px"><label>Region 端点</label><input id="oss_region" value="${esc(this._ossRegion)}" placeholder="oss-cn-hangzhou"></div>
-          <div class="fg" style="margin-bottom:6px"><label>AccessKey</label><input id="oss_ak" value="${esc(this._ossAk)}" placeholder="AK..."></div>
-          <div class="fg" style="margin-bottom:6px"><label>SecretKey</label><input id="oss_sk" type="password" placeholder="SK..."></div>
+          <div style="font-size:0.82rem;font-weight:600;margin-bottom:8px">🐙 GitHub 自动同步</div>
+          <p style="font-size:0.75rem;color:var(--t3);margin-bottom:8px;line-height:1.5">开启后每次修改自动同步 data.json 到 GitHub 仓库。<br>需要在 <a href="https://github.com/settings/tokens" target="_blank" style="color:var(--gold)">GitHub Token 设置</a> 创建 <b>repo</b> 作用域的 token：</p>
+          <div class="fg" style="margin-bottom:6px"><label>Owner（用户名）</label><input id="gh_owner" value="${syncCfg?esc(syncCfg.owner):'yangshanle'}" placeholder="GitHub 用户名"></div>
+          <div class="fg" style="margin-bottom:6px"><label>仓库名称</label><input id="gh_repo" value="${syncCfg?esc(syncCfg.repo):''}" placeholder="你的仓库名"></div>
+          <div class="fg" style="margin-bottom:6px"><label>Personal Token</label><input id="gh_token" type="password" placeholder="ghp_..."></div>
           <button class="btn btn-sm btn-p" id="syncConnBtn" style="width:100%">🔗 连接</button>
         </div>
       `;
@@ -3321,7 +3267,7 @@ const App = {
     this.modal({
       title: '💾 数据备份',
       body: `
-        <p style="font-size:0.85rem;color:var(--t2);margin-bottom:12px;line-height:1.6">数据存储在浏览器本地，清除缓存会丢失。<br>定期导出备份，安全无忧。</p>
+        <p style="font-size:0.85rem;color:var(--t2);margin-bottom:12px;line-height:1.6">数据存储在浏览器本地，清除缓存会丢失。<br>GitHub 同步让手机电脑数据互通。</p>
         <button class="btn btn-p" id="exportBtn" style="width:100%;margin-bottom:8px">📥 导出数据（下载 JSON）</button>
         <button class="btn btn-s" id="importBtn" style="width:100%">📤 导入数据（恢复备份）</button>
         <input type="file" id="importFile" accept=".json" style="display:none">
@@ -3338,10 +3284,10 @@ const App = {
           this.importData(file);
         };
         if (connected) {
-          $('syncNowBtn').onclick = () => { this._ossSave(); this.toast('🔄 同步中...'); };
-          $('syncDisBtn').onclick = () => this._disconnectOSS();
+          $('syncNowBtn').onclick = () => { this._ghSave(); this.toast('🔄 同步中...'); };
+          $('syncDisBtn').onclick = () => this._disconnectGH();
         } else {
-          $('syncConnBtn').onclick = () => this._connectOSS();
+          $('syncConnBtn').onclick = () => this._connectGH();
         }
       },
     });
